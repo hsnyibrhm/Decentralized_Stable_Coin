@@ -25,6 +25,8 @@
 
 pragma solidity ^0.8.18;
 
+import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
+
 /**
  * @title DSCEngine
  * @author hsnyibrhm
@@ -44,9 +46,78 @@ pragma solidity ^0.8.18;
  */
 
 contract DSCEngine {
+    /**
+     * errors
+     */
+    error DSCEngine__NeedsMoreCollateral();
+    error DSCEngine__NotAllowedToMint();
+    error DSCEngine__MustBeMoreThanZero();
+    error DSCEngine_TokenAddressAndPriceFeedAddressMustBeSameLength();
+
+    /**
+     * state variables
+     */
+
+    mapping(address token => address priceFeed) private s_priceFeeds;
+
+    DecentralizedStableCoin private immutable i_dsc;
+
+    /**
+     * modifiers
+     */
+    modifier moreThanZero(uint256 amount) {
+        if (amount <= 0) {
+            revert DSCEngine__MustBeMoreThanZero();
+        }
+        _;
+    }
+
+    // modifier isAllowedToken(address token) {
+    //     // check if the token is allowed to be used as collateral
+    //     if (!allowedTokens[token]) {
+    //         revert DSCEngine__NotAllowedToMint();
+    //     }
+    //     _;
+    // }
+
+    /**
+     * constructor
+     */
+    constructor(
+        address[] memory tokenAddresses,
+        address[] memory priceFeedAddress,
+        address dscAddress
+    ) {
+        if (tokenAddresses.length != priceFeedAddress.length) {
+            revert DSCEngine_TokenAddressAndPriceFeedAddressMustBeSameLength();
+        }
+        for (uint256 i = 0; i < tokenAddresses.length; i++) {
+            s_priceFeeds[tokenAddresses[i]] = priceFeedAddress[i];
+        }
+        i_dsc = DecentralizedStableCoin(dscAddress);
+    }
+
+    /**
+     * function
+     */
+
+    /**
+     * external functions
+     */
     function depositCollateralAndMintDsc() external payable {}
 
-    function depositCollateral() external payable {}
+    /**
+     *
+     * @param tokenCollateralAddress the address of the token to deposit as collateral
+     * @param amountCollateral the amount of collareral to deposit
+     */
+    function depositCollateral(
+        address tokenCollateralAddress,
+        uint256 amountCollateral
+    ) external moreThanZero(amountCollateral) {
+        // 1. transfer collateral to this contract
+        // 2. update the users collateral balance
+    }
 
     function redeemCollateralForDsc() external payable {}
 
