@@ -27,9 +27,9 @@
 
 pragma solidity ^0.8.18;
 
-import {ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
-import {ERC20Burnable} from "openzeppelin-contracts/contracts/token/ERC20/extensions/ERC20Burnable.sol";
-import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { ERC20Burnable } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
 /*
  * @title Decentralized Stable Coin
@@ -45,7 +45,7 @@ contract DecentralizedStableCoin is ERC20, ERC20Burnable, Ownable {
     error DecentralizedStableCoin__BurnAmountExceedsBalance();
     error DecentralizedStableCoin__NotZeroAddress();
 
-    constructor() ERC20("Decentralized USD Coin", "DSC") {}
+    constructor() ERC20("Decentralized USD Coin", "DSC") { }
 
     function burn(uint256 amount) public override onlyOwner {
         uint256 balance = balanceOf(msg.sender);
@@ -58,10 +58,7 @@ contract DecentralizedStableCoin is ERC20, ERC20Burnable, Ownable {
         super.burn(amount);
     }
 
-    function mint(
-        address to,
-        uint256 amount
-    ) external onlyOwner returns (bool) {
+    function mint(address to, uint256 amount) external onlyOwner returns (bool) {
         if (to == address(0)) {
             revert DecentralizedStableCoin__NotZeroAddress();
         }

@@ -6,7 +6,12 @@ libs = ["lib"]
 remappings = [
     "ds-test/=lib/ds-test/src",
     "forge-std/=lib/forge-std/src",
-    "openzeppelin-contracts/=lib/openzepplin-contracts",
+    "@openzeppelin/contracts/=lib/openzepplin-contracts/contracts/"
 ]
 
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = true
+int_types = "long"
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
