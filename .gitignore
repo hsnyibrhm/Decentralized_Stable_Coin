@@ -10,5 +10,9 @@ out/
 # Docs
 docs/
 
+# Local project notes and reviews
+/PROJECT_SUMMARY.txt
+/SECURITY-REVIEW.md
+
 # Dotenv file
 .env

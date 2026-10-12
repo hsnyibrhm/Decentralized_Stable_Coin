@@ -78,6 +78,60 @@ contract DSCEngineTest is Test {
         assertEq(engine.getUsdValue(address(collateral), 15 ether), 30_000 ether);
     }
 
+    function testPriceFeedDecimalsAreNormalized() public {
+        MockV3Aggregator sixDecimalPriceFeed = new MockV3Aggregator(6, 2_000e6);
+        address[] memory collateralTokens = new address[](1);
+        address[] memory priceFeeds = new address[](1);
+        collateralTokens[0] = address(collateral);
+        priceFeeds[0] = address(sixDecimalPriceFeed);
+        DSCEngine sixDecimalEngine = new DSCEngine(collateralTokens, priceFeeds, address(dsc));
+
+        assertEq(sixDecimalEngine.getUsdValue(address(collateral), 15 ether), 30_000 ether);
+        assertEq(sixDecimalEngine.getTokenAmountFromUsd(address(collateral), 100 ether), 0.05 ether);
+    }
+
+    function testRevertsIfOracleAnswerIsNotPositive() public {
+        priceFeed.updateAnswer(0);
+        vm.expectRevert(DSCEngine.DSCEngine__InvalidOracleAnswer.selector);
+        engine.getUsdValue(address(collateral), 1 ether);
+
+        priceFeed.updateAnswer(-1);
+        vm.expectRevert(DSCEngine.DSCEngine__InvalidOracleAnswer.selector);
+        engine.getUsdValue(address(collateral), 1 ether);
+    }
+
+    function testRevertsIfOracleDataIsStale() public {
+        vm.warp(block.timestamp + 3 hours + 1);
+
+        vm.expectRevert(DSCEngine.DSCEngine__StaleOraclePrice.selector);
+        engine.getUsdValue(address(collateral), 1 ether);
+    }
+
+    function testRevertsIfOracleRoundIsInvalid() public {
+        priceFeed.updateRoundData(ETH_USD_PRICE, 2, block.timestamp, 1);
+
+        vm.expectRevert(DSCEngine.DSCEngine__InvalidOracleRound.selector);
+        engine.getUsdValue(address(collateral), 1 ether);
+    }
+
+    function testRevertsIfOracleUpdatedAtIsZero() public {
+        priceFeed.updateRoundData(ETH_USD_PRICE, 1, 0, 1);
+
+        vm.expectRevert(DSCEngine.DSCEngine__InvalidOracleRound.selector);
+        engine.getUsdValue(address(collateral), 1 ether);
+    }
+
+    function testRevertsIfFeedDecimalsExceed18() public {
+        MockV3Aggregator highDecimalPriceFeed = new MockV3Aggregator(19, 2_000e19);
+        address[] memory collateralTokens = new address[](1);
+        address[] memory priceFeeds = new address[](1);
+        collateralTokens[0] = address(collateral);
+        priceFeeds[0] = address(highDecimalPriceFeed);
+
+        vm.expectRevert(DSCEngine.DSCEngine__UnsupportedFeedDecimals.selector);
+        new DSCEngine(collateralTokens, priceFeeds, address(dsc));
+    }
+
     function testRevertsIfCollateralAmountIsZero() public {
         vm.expectRevert(DSCEngine.DSCEngine__MustBeMoreThanZero.selector);
         engine.depositCollateral(address(collateral), 0);
@@ -166,6 +220,16 @@ contract DSCEngineTest is Test {
         assertEq(engine.getDscMinted(user), 0);
     }
 
+    function testBurnFromCannotBreakSupplyDebtInvariant() public depositedCollateralAndMintedDsc {
+        vm.prank(user);
+        dsc.approve(address(this), LIQUIDATION_DSC_AMOUNT);
+
+        vm.expectRevert(DecentralizedStableCoin.DecentralizedStableCoin__BurnFromNotSupported.selector);
+        dsc.burnFrom(user, LIQUIDATION_DSC_AMOUNT);
+
+        assertEq(dsc.totalSupply(), engine.getDscMinted(user));
+    }
+
     function testRevertsIfBurnAmountIsZero() public depositedCollateralAndMintedDsc {
         vm.prank(user);
         vm.expectRevert(DSCEngine.DSCEngine__MustBeMoreThanZero.selector);
@@ -219,6 +283,46 @@ contract DSCEngineTest is Test {
         engine.liquidate(address(collateral), user, debtToCover);
 
         assertEq(collateral.balanceOf(liquidator), expectedCollateral);
+    }
+
+    function testLiquidationRevertsAtomicallyWhenCollateralIsInsufficient() public depositedCollateralAndMintedDsc {
+        priceFeed.updateAnswer(500e8);
+        vm.prank(user);
+        dsc.transfer(liquidator, LIQUIDATION_DSC_AMOUNT);
+        vm.prank(liquidator);
+        dsc.approve(address(engine), LIQUIDATION_DSC_AMOUNT);
+
+        uint256 debtToCover = 5_000 ether;
+        uint256 collateralRequired = engine.getTokenAmountFromUsd(address(collateral), debtToCover);
+        collateralRequired += collateralRequired / 10;
+
+        assertGt(collateralRequired, COLLATERAL_AMOUNT);
+        uint256 initialSupply = dsc.totalSupply();
+        uint256 initialUserDebt = engine.getDscMinted(user);
+        uint256 initialUserDscBalance = dsc.balanceOf(user);
+        uint256 initialLiquidatorDscBalance = dsc.balanceOf(liquidator);
+        uint256 initialUserCollateral = engine.getCollateralBalanceOfUser(user, address(collateral));
+        uint256 initialEngineCollateral = collateral.balanceOf(address(engine));
+        uint256 initialLiquidatorCollateral = collateral.balanceOf(liquidator);
+
+        vm.prank(liquidator);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DSCEngine.DSCEngine__InsufficientCollateralForLiquidation.selector,
+                address(collateral),
+                initialUserCollateral,
+                collateralRequired
+            )
+        );
+        engine.liquidate(address(collateral), user, debtToCover);
+
+        assertEq(dsc.totalSupply(), initialSupply);
+        assertEq(engine.getDscMinted(user), initialUserDebt);
+        assertEq(dsc.balanceOf(user), initialUserDscBalance);
+        assertEq(dsc.balanceOf(liquidator), initialLiquidatorDscBalance);
+        assertEq(engine.getCollateralBalanceOfUser(user, address(collateral)), initialUserCollateral);
+        assertEq(collateral.balanceOf(address(engine)), initialEngineCollateral);
+        assertEq(collateral.balanceOf(liquidator), initialLiquidatorCollateral);
     }
 
     function testEmitCollateralRedeemedWithCorrectArgs() public depositedCollateral {
@@ -286,6 +390,58 @@ contract DSCEngineTest is Test {
         tokenAddresses[0] = address(collateral);
 
         vm.expectRevert(DSCEngine.DSCEngine_TokenAddressAndPriceFeedAddressMustBeSameLength.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
+    }
+
+    function testConstructorRejectsZeroCollateralToken() public {
+        address[] memory tokenAddresses = new address[](1);
+        address[] memory priceFeedAddresses = new address[](1);
+        priceFeedAddresses[0] = address(priceFeed);
+
+        vm.expectRevert(DSCEngine.DSCEngine__ZeroCollateralTokenAddress.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
+    }
+
+    function testConstructorRejectsZeroPriceFeed() public {
+        address[] memory tokenAddresses = new address[](1);
+        address[] memory priceFeedAddresses = new address[](1);
+        tokenAddresses[0] = address(collateral);
+
+        vm.expectRevert(DSCEngine.DSCEngine__ZeroPriceFeedAddress.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
+    }
+
+    function testConstructorRejectsZeroDscAddress() public {
+        address[] memory tokenAddresses = new address[](0);
+        address[] memory priceFeedAddresses = new address[](0);
+
+        vm.expectRevert(DSCEngine.DSCEngine__ZeroDscAddress.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(0));
+    }
+
+    function testConstructorRejectsDuplicateCollateralTokens() public {
+        address[] memory tokenAddresses = new address[](2);
+        address[] memory priceFeedAddresses = new address[](2);
+        tokenAddresses[0] = address(collateral);
+        tokenAddresses[1] = address(collateral);
+        priceFeedAddresses[0] = address(priceFeed);
+        priceFeedAddresses[1] = address(priceFeed);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(DSCEngine.DSCEngine__DuplicateCollateralToken.selector, address(collateral))
+        );
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
+    }
+
+    function testConstructorRejectsNonContractPriceFeed() public {
+        address[] memory tokenAddresses = new address[](1);
+        address[] memory priceFeedAddresses = new address[](1);
+        tokenAddresses[0] = address(collateral);
+        priceFeedAddresses[0] = makeAddr("notAFeedContract");
+
+        vm.expectRevert(
+            abi.encodeWithSelector(DSCEngine.DSCEngine__InvalidContractAddress.selector, priceFeedAddresses[0])
+        );
         new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
     }
 

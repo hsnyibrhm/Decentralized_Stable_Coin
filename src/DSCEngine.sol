@@ -27,6 +27,7 @@ pragma solidity ^0.8.18;
 
 import { DecentralizedStableCoin } from "./DecentralizedStableCoin.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { AggregatorV3Interface } from "./interfaces/AggregatorV3Interface.sol";
 
 /**
@@ -61,9 +62,20 @@ contract DSCEngine {
     error DSCEngine__MintFailed();
     error DSCEngine__HealthFactorOk();
     error DSCEngine__HealthFactorNotImproved();
+    error DSCEngine__InsufficientCollateralForLiquidation(address token, uint256 available, uint256 required);
+    error DSCEngine__InvalidOracleAnswer();
+    error DSCEngine__InvalidOracleRound();
+    error DSCEngine__StaleOraclePrice();
+    error DSCEngine__UnsupportedFeedDecimals();
+    error DSCEngine__ZeroCollateralTokenAddress();
+    error DSCEngine__ZeroPriceFeedAddress();
+    error DSCEngine__ZeroDscAddress();
+    error DSCEngine__InvalidContractAddress(address account);
+    error DSCEngine__DuplicateCollateralToken(address token);
 
-    uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
     uint256 private constant PRECISION = 1e18;
+    uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
+    uint256 private constant STALE_PRICE_TIMEOUT = 3 hours;
     uint256 private constant LIQUIDATION_THRESHOLD = 50;
     uint256 private constant LIQUIDATION_PRECISION = 100;
     uint256 private constant LIQUIDATION_BONUS = 10;
@@ -74,6 +86,7 @@ contract DSCEngine {
      */
 
     mapping(address token => address priceFeed) private s_priceFeeds;
+    mapping(address token => uint8 decimals) private s_feedDecimals;
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
     mapping(address user => uint256 amountDscMinted) private s_DSCMinted;
     address[] private s_collateralTokens;
@@ -109,9 +122,38 @@ contract DSCEngine {
         if (tokenAddresses.length != priceFeedAddress.length) {
             revert DSCEngine_TokenAddressAndPriceFeedAddressMustBeSameLength();
         }
+        if (dscAddress == address(0)) {
+            revert DSCEngine__ZeroDscAddress();
+        }
+        if (dscAddress.code.length == 0) {
+            revert DSCEngine__InvalidContractAddress(dscAddress);
+        }
         for (uint256 i = 0; i < tokenAddresses.length; i++) {
-            s_priceFeeds[tokenAddresses[i]] = priceFeedAddress[i];
-            s_collateralTokens.push(tokenAddresses[i]);
+            address token = tokenAddresses[i];
+            address priceFeed = priceFeedAddress[i];
+            if (token == address(0)) {
+                revert DSCEngine__ZeroCollateralTokenAddress();
+            }
+            if (priceFeed == address(0)) {
+                revert DSCEngine__ZeroPriceFeedAddress();
+            }
+            if (s_priceFeeds[token] != address(0)) {
+                revert DSCEngine__DuplicateCollateralToken(token);
+            }
+            if (token.code.length == 0) {
+                revert DSCEngine__InvalidContractAddress(token);
+            }
+            if (priceFeed.code.length == 0) {
+                revert DSCEngine__InvalidContractAddress(priceFeed);
+            }
+
+            uint8 feedDecimals = AggregatorV3Interface(priceFeed).decimals();
+            if (feedDecimals > 18) {
+                revert DSCEngine__UnsupportedFeedDecimals();
+            }
+            s_priceFeeds[token] = priceFeed;
+            s_feedDecimals[token] = feedDecimals;
+            s_collateralTokens.push(token);
         }
         i_dsc = DecentralizedStableCoin(dscAddress);
     }
@@ -196,6 +238,10 @@ contract DSCEngine {
             revert DSCEngine__HealthFactorOk();
         }
         uint256 collateralToRedeem = _getCollateralToRedeem(collateral, debtToCover);
+        uint256 userCollateral = s_collateralDeposited[user][collateral];
+        if (collateralToRedeem > userCollateral) {
+            revert DSCEngine__InsufficientCollateralForLiquidation(collateral, userCollateral, collateralToRedeem);
+        }
         _burnDsc(debtToCover, user, msg.sender);
         _redeemCollateral(user, msg.sender, collateral, collateralToRedeem);
         uint256 endingUserHealthFactor = _healthFactor(user);
@@ -280,13 +326,13 @@ contract DSCEngine {
     }
 
     function getUsdValue(address token, uint256 amount) public view returns (uint256) {
-        (, int256 answer,,,) = AggregatorV3Interface(s_priceFeeds[token]).latestRoundData();
-        return ((uint256(answer) * ADDITIONAL_FEED_PRECISION) * amount) / PRECISION;
+        uint256 price = _getValidatedPrice(token);
+        return (price * amount) / PRECISION;
     }
 
     function getTokenAmountFromUsd(address token, uint256 usdAmountInWei) public view returns (uint256) {
-        (, int256 answer,,,) = AggregatorV3Interface(s_priceFeeds[token]).latestRoundData();
-        return (usdAmountInWei * PRECISION) / (uint256(answer) * ADDITIONAL_FEED_PRECISION);
+        uint256 price = _getValidatedPrice(token);
+        return (usdAmountInWei * PRECISION) / price;
     }
 
     function getCollateralBalanceOfUser(address user, address token) external view returns (uint256) {
@@ -311,6 +357,22 @@ contract DSCEngine {
 
     function getDsc() external view returns (address) {
         return address(i_dsc);
+    }
+
+    function _getValidatedPrice(address token) private view returns (uint256) {
+        (uint80 roundId, int256 answer,, uint256 updatedAt, uint80 answeredInRound) =
+            AggregatorV3Interface(s_priceFeeds[token]).latestRoundData();
+        if (answer <= 0) {
+            revert DSCEngine__InvalidOracleAnswer();
+        }
+        if (roundId == 0 || answeredInRound < roundId || updatedAt == 0 || updatedAt > block.timestamp) {
+            revert DSCEngine__InvalidOracleRound();
+        }
+        if (block.timestamp - updatedAt > STALE_PRICE_TIMEOUT) {
+            revert DSCEngine__StaleOraclePrice();
+        }
+
+        return uint256(answer) * (10 ** (18 - s_feedDecimals[token]));
     }
 
     function calculateHealthFactor(uint256 totalDscMinted, uint256 collateralValueInUsd)

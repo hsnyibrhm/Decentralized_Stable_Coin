@@ -13,17 +13,23 @@ contract DeployDSC is Script {
     uint8 private constant FEED_DECIMALS = 8;
     int256 private constant ETH_USD_PRICE = 2000e8;
 
-    function run() external returns (DSCEngine engine, DecentralizedStableCoin dsc) {
-        vm.startBroadcast();
+    error DeployDSC__ZeroCollateralTokenAddress();
+    error DeployDSC__ZeroPriceFeedAddress();
+    error DeployDSC__InvalidContractAddress(address account);
 
+    function run() external returns (DSCEngine engine, DecentralizedStableCoin dsc) {
         address collateralToken;
         address priceFeed;
         if (block.chainid == LOCAL_CHAIN_ID) {
+            vm.startBroadcast();
             collateralToken = address(new MockERC20());
             priceFeed = address(new MockV3Aggregator(FEED_DECIMALS, ETH_USD_PRICE));
         } else {
             collateralToken = vm.envAddress("COLLATERAL_TOKEN");
             priceFeed = vm.envAddress("COLLATERAL_PRICE_FEED");
+            _validateExternalAddress(collateralToken, true);
+            _validateExternalAddress(priceFeed, false);
+            vm.startBroadcast();
         }
 
         dsc = new DecentralizedStableCoin();
@@ -35,5 +41,15 @@ contract DeployDSC is Script {
         dsc.transferOwnership(address(engine));
 
         vm.stopBroadcast();
+    }
+
+    function _validateExternalAddress(address account, bool isCollateralToken) private view {
+        if (account == address(0)) {
+            if (isCollateralToken) revert DeployDSC__ZeroCollateralTokenAddress();
+            revert DeployDSC__ZeroPriceFeedAddress();
+        }
+        if (account.code.length == 0) {
+            revert DeployDSC__InvalidContractAddress(account);
+        }
     }
 }
